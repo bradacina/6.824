@@ -1,10 +1,15 @@
 package mr
 
-import "fmt"
-import "log"
-import "net/rpc"
-import "hash/fnv"
-
+import (
+	"crypto/rand"
+	"encoding/binary"
+	"fmt"
+	"hash/fnv"
+	"log"
+	"net/rpc"
+	"sync"
+	"time"
+)
 
 //
 // Map functions return a slice of KeyValue.
@@ -12,6 +17,13 @@ import "hash/fnv"
 type KeyValue struct {
 	Key   string
 	Value string
+}
+
+type InternalState struct {
+	clientId  uint32
+	workingOn string
+	state     WorkerState
+	mut       sync.Mutex
 }
 
 //
@@ -24,18 +36,144 @@ func ihash(key string) int {
 	return int(h.Sum32() & 0x7fffffff)
 }
 
-
 //
 // main/mrworker.go calls this function.
 //
 func Worker(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
+	var clientId uint32
+	binary.Read(rand.Reader, binary.LittleEndian, &clientId)
 
-	// Your worker implementation here.
+	log.SetFlags(log.Ltime | log.Lmicroseconds)
 
-	// uncomment to send the Example RPC to the coordinator.
-	// CallExample()
+	// setup internal state
+	state := InternalState{
+		clientId:  clientId,
+		state:     WSFree,
+		workingOn: "",
+		mut:       sync.Mutex{},
+	}
 
+	done := make(chan bool)
+
+	workQueue := make(chan WorkerCommand)
+
+	// start the ping timer
+	go pingAtInterval(&state, workQueue, done)
+
+	// start the worker
+	go monitorWorkQueue(&state, workQueue)
+
+	// block here until we're done
+	_ = <-done
+
+	log.Println(clientId, "Exiting")
+	// todo: flush stdout
+
+}
+
+func monitorWorkQueue(state *InternalState, workQueue <-chan WorkerCommand) {
+	for command := range workQueue {
+		state.mut.Lock()
+
+		freeToDoWork := state.state == WSFree
+		state.mut.Unlock()
+
+		if !freeToDoWork {
+			continue
+		}
+
+		if command.CommandType == WCMap {
+			// validate command.arguments
+
+			if command.Arguments == nil {
+				command.Arguments = []string{}
+			}
+
+			if len(command.Arguments) != 2 {
+				log.Println(state.clientId, "received command", command.CommandType, "but not enough arguments were sent:", command.Arguments)
+				log.Println(state.clientId, "skipping command")
+				continue
+			}
+			state.mut.Lock()
+			state.state = WSMap
+			state.workingOn = command.Arguments[0]
+			state.mut.Unlock()
+
+			go doMapTask(state)
+
+		} else if command.CommandType == WCReduce {
+			// validate command.arguments
+
+			if command.Arguments == nil {
+				command.Arguments = []string{}
+			}
+
+			if len(command.Arguments) != 2 {
+				log.Println(state.clientId, "received command", command.CommandType, "but not enough arguments were sent:", command.Arguments)
+				log.Println(state.clientId, "skipping command")
+				continue
+			}
+
+			state.mut.Lock()
+			state.state = WSReduce
+			state.workingOn = command.Arguments[0]
+			state.mut.Unlock()
+
+			go doReduceTask(state)
+
+		} else {
+			log.Println(state.clientId, "received command", command.CommandType, "on the workQueue. Not handling!")
+		}
+
+	}
+}
+
+func doMapTask(state *InternalState) {
+
+}
+
+func doReduceTask(state *InternalState) {
+
+}
+
+func pingAtInterval(state *InternalState, workQueue chan<- WorkerCommand, done chan<- bool) {
+	retries := 0
+	ticker := time.NewTicker(time.Second)
+	for {
+		select {
+		case _ = <-ticker.C:
+			ticker.Stop()
+			args := PingArgs{
+				ClientId:  state.clientId,
+				State:     state.state,
+				WorkingOn: state.workingOn,
+			}
+			reply := PingReply{}
+			if call("Coordinator.Ping", &args, &reply) {
+				retries = 0
+				log.Println(state.clientId, ": Ping Pong with reply", reply)
+
+				if reply.Command.CommandType == WCExit {
+					done <- true
+					return
+				}
+
+				if reply.Command.CommandType == WCMap || reply.Command.CommandType == WCReduce {
+					workQueue <- reply.Command
+				}
+
+				ticker.Reset(time.Millisecond * time.Duration(reply.CallBackInMilli))
+			} else {
+				retries += 1
+				if retries == 4 {
+					done <- true
+					return
+				}
+				ticker.Reset(time.Second)
+			}
+		}
+	}
 }
 
 //
