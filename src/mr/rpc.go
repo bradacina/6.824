@@ -27,9 +27,10 @@ type ExampleReply struct {
 type WorkerState uint8
 
 const (
-	WSFree   WorkerState = iota // i'm doing nothing
-	WSMap                       // i'm running a map task
-	WSReduce                    // i'm running a reduce task
+	WSFree     WorkerState = iota // i'm doing nothing
+	WSMap                         // i'm running a map task
+	WSReduce                      // i'm running a reduce task
+	WSFinished                    // i finished by assigned task
 )
 
 type WorkerCommandType uint8
@@ -47,9 +48,9 @@ type WorkerCommand struct {
 }
 
 type PingArgs struct {
-	ClientId  uint32
-	State     WorkerState
-	WorkingOn string
+	ClientId uint32
+	State    WorkerState
+	Output   []string
 }
 type PingReply struct {
 	CallBackInMilli int
@@ -64,6 +65,8 @@ func (s WorkerState) String() string {
 		return "Map"
 	case WSReduce:
 		return "Reduce"
+	case WSFinished:
+		return "Finished"
 	default:
 		return "Unknown"
 	}
