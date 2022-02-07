@@ -1,13 +1,13 @@
 In coordinator
 --------------
-switch from Task to *Task
-switch from Client to *Client
-timer to exit coordiator when the Exit phase starts
 look at log messages
-don't rely on timer.Reset(millisecond) to move between select cases,
-    instead pull out a common function
+(done) switch from Task to *Task
+(done) switch from Client to *Client
+(done)timer to exit coordiator when the Exit phase starts
 
 In worker
 ---------
+don't rely on timer.Reset(millisecond) to move between select cases,
+    instead pull out a common function
 file read/write
 do the actual work
