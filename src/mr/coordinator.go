@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/rpc"
 	"os"
+	"path"
 	"strconv"
 	"strings"
 	"sync"
@@ -125,7 +126,7 @@ func (c *Coordinator) Ping(args *PingArgs, reply *PingReply) error {
 
 			if task.taskType == TTMap {
 				// save the output file paths into the task's output
-				if len(args.Output) != c.numInputFiles {
+				if len(args.Output) != c.nReduce {
 					log.Println("[WARNING] Coordinator: Client", client.clientId,
 						"did not return enough Outputs when finishing Map task. Expected:", c.numInputFiles,
 						", received", len(args.Output))
@@ -232,7 +233,7 @@ func (c *Coordinator) initReducePhase() {
 			id:           newTaskId(),
 			taskType:     TTReduce,
 			input:        outputs,
-			outputPrefix: "reduce-" + strconv.Itoa(i),
+			outputPrefix: "mr-out-" + strconv.Itoa(i),
 		})
 	}
 }
@@ -269,7 +270,7 @@ func findOutputFromMapTask(reduceTaskSuffix string, outputs []string) (string, b
 }
 
 //
-//
+// This go routine will check worker timeouts at regular intervals by calling checkTimeouts()
 //
 func (c *Coordinator) monitorTimeouts() {
 	timer := time.NewTicker(time.Second)
@@ -281,6 +282,10 @@ func (c *Coordinator) monitorTimeouts() {
 	}
 }
 
+//
+// Checks the list of workers for any that have timedout (did not send a Ping in a while)
+// If a worker times out, it is removed from the list of workers and its task is marked as Todo
+//
 func (c *Coordinator) checkTimeouts() {
 	c.mut.Lock()
 	defer c.mut.Unlock()
@@ -374,7 +379,7 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 			id:           newTaskId(),
 			taskType:     TTMap,
 			input:        []string{f},
-			outputPrefix: f + "-" + strconv.Itoa(i) + "-",
+			outputPrefix: path.Base(f) + "-" + strconv.Itoa(i) + "-",
 			output:       make([]string, 0, nReduce),
 		})
 	}

@@ -1,14 +1,18 @@
 package mr
 
 import (
+	"bufio"
 	"crypto/rand"
 	"encoding/binary"
 	"fmt"
 	"hash/fnv"
+	"io"
+	"io/ioutil"
 	"log"
 	"net/rpc"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -21,12 +25,16 @@ type KeyValue struct {
 	Value string
 }
 
+var delimiter = "|!|"
+
 type InternalState struct {
 	clientId uint32
 	state    WorkerState
 	mut      sync.Mutex
 	output   []string
 	workDone chan bool
+	mapf     func(string, string) []KeyValue
+	reducef  func(string, []string) string
 }
 
 //
@@ -44,6 +52,8 @@ func ihash(key string) int {
 //
 func Worker(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
+
+	// generate a random clientId to send to the coordinator
 	var clientId uint32
 	binary.Read(rand.Reader, binary.LittleEndian, &clientId)
 
@@ -57,6 +67,8 @@ func Worker(mapf func(string, string) []KeyValue,
 		state:    WSFree,
 		mut:      sync.Mutex{},
 		workDone: workDone,
+		mapf:     mapf,
+		reducef:  reducef,
 	}
 
 	done := make(chan bool)
@@ -127,7 +139,6 @@ func monitorWorkQueue(s *InternalState, workQueue <-chan WorkerCommand) {
 		} else {
 			log.Println(s.clientId, "received command", command.CommandType, "on the workQueue. Not handling!")
 		}
-
 	}
 }
 
@@ -140,13 +151,18 @@ func doMapTask(s *InternalState, inputFile string, outputPrefix string, nReduceS
 
 	nReduce, err := strconv.Atoi(nReduceString)
 	if err != nil {
-		log.Println("[ERROR]", clientId, "Cannot convert number of reduce tasks", nReduceString, "to integer")
-		os.Exit(1)
+		log.Fatalln("[ERROR]", clientId, "Cannot convert number of reduce tasks", nReduceString, "to integer")
 	}
 
 	log.Println(clientId, "Starting Map task on input file", inputFile, "with number of reduce outputs", nReduce)
 
-	// todo: do the work
+	content, err := ioutil.ReadFile(inputFile)
+	if err != nil {
+		log.Fatalln("[ERROR]", clientId, "cannot read input file", inputFile, ".", err)
+	}
+
+	// run the map function given to us by the plugin
+	kva := s.mapf(inputFile, string(content))
 
 	output := make([]string, 0, nReduce)
 
@@ -154,9 +170,30 @@ func doMapTask(s *InternalState, inputFile string, outputPrefix string, nReduceS
 		output = append(output, outputPrefix+strconv.Itoa(i))
 	}
 
+	// create the output files
+	outputFiles := make([]*os.File, 0, nReduce)
+	for _, v := range output {
+		f, err := os.Create(v)
+		if err != nil {
+			log.Fatalln("[ERROR]", clientId, "Failed to create output file", v, "for Map output")
+		}
+
+		outputFiles = append(outputFiles, f)
+	}
+
+	for _, item := range kva {
+		reduceNumber := ihash(item.Key) % nReduce
+		outputFiles[reduceNumber].WriteString(item.Key + delimiter + item.Value + "\n")
+	}
+
+	// close all output files
+	for _, f := range outputFiles {
+		f.Close()
+	}
+
 	// pretend we do work for 4 seconds
-	wait := time.NewTimer(4 * time.Second)
-	<-wait.C
+	// wait := time.NewTimer(4 * time.Second)
+	// <-wait.C
 
 	log.Println(clientId, "Map task finished")
 
@@ -167,9 +204,9 @@ func doMapTask(s *InternalState, inputFile string, outputPrefix string, nReduceS
 	s.workDone <- true
 }
 
-func printS(s *InternalState) {
-	log.Println(s.clientId, " State:", s.state)
-}
+// func printS(s *InternalState) {
+// 	log.Println(s.clientId, " State:", s.state)
+// }
 
 func doReduceTask(s *InternalState, arguments []string) {
 	s.mut.Lock()
@@ -180,9 +217,79 @@ func doReduceTask(s *InternalState, arguments []string) {
 
 	log.Println(clientId, "Starting Reduce task on input", arguments)
 
+	if len(arguments) < 2 {
+		log.Fatalln("[ERROR]", clientId, "Reduce task does not have enough arguments")
+	}
+
+	outputFileName := arguments[0]
+
+	// open input files
+	inputFiles := make([]*os.File, 0, len(arguments)-1)
+	for i := 1; i < len(arguments); i++ {
+		f, err := os.Open(arguments[i])
+		if err != nil {
+			log.Fatalln("[ERROR]", clientId, "Cannot open input file for Reduce task", arguments[i])
+		}
+
+		inputFiles = append(inputFiles, f)
+	}
+
+	// this will probably destroy the memory on big inputs
+	allInput := make(map[string]([]string))
+
+	// todo: sort input files first then only read into memory all values
+	// from all input files for the smallest key, pass it to Reduce, rinse and repeat
+
+	for _, f := range inputFiles {
+		r := bufio.NewReader(f)
+		for {
+			line, err := r.ReadString('\n')
+			lastIteration := err == io.EOF
+			if err != nil && err != io.EOF {
+				log.Println("[ERROR]", clientId, "Reduce task: Error reading line from input", line)
+				continue
+			}
+
+			if lastIteration && len(line) == 0 {
+				break
+			}
+
+			tokens := strings.Split(line, delimiter)
+			if len(tokens) != 2 {
+				log.Println("[Error]", clientId, "Reduce task: Line does not contain exactly 2 tokens", line)
+				continue
+			}
+
+			if len(tokens[0]) > 0 {
+				allInput[tokens[0]] = append(allInput[tokens[0]], tokens[1])
+			}
+
+			if lastIteration {
+				break
+			}
+		}
+	}
+
+	// close input files
+	for _, f := range inputFiles {
+		f.Close()
+	}
+
+	output, err := os.Create(outputFileName)
+	if err != nil {
+		log.Fatalln("[ERROR]", clientId, "Cannot create output file for Reduce task", outputFileName)
+	}
+	defer output.Close()
+
+	for k, v := range allInput {
+		result := s.reducef(k, v)
+
+		output.WriteString(k + " " + result + "\n")
+	}
+
 	// pretend we do work for 4 seconds
-	wait := time.NewTimer(4 * time.Second)
-	<-wait.C
+	// wait := time.NewTimer(4 * time.Second)
+	// <-wait.C
 
 	log.Println(clientId, "Reduce task finished")
 
