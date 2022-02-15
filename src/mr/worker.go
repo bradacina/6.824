@@ -254,6 +254,8 @@ func doReduceTask(s *InternalState, arguments []string) {
 				break
 			}
 
+			line = strings.TrimSuffix(line, "\n")
+
 			tokens := strings.Split(line, delimiter)
 			if len(tokens) != 2 {
 				log.Println("[Error]", clientId, "Reduce task: Line does not contain exactly 2 tokens", line)
